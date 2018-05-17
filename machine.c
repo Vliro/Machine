@@ -6,13 +6,13 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define NREG		(32)	
-#define PAGESIZE_WIDTH	(2)	
-#define PAGESIZE	(1<<PAGESIZE_WIDTH)	
+#define NREG		(32)
+#define PAGESIZE_WIDTH	(2)
+#define PAGESIZE	(1<<PAGESIZE_WIDTH)
 #define NPAGES		(2048)
-#define RAM_PAGES	(8)	
+#define RAM_PAGES	(8)
 #define RAM_SIZE	(RAM_PAGES * PAGESIZE)
-#define SWAP_PAGES	(128)	
+#define SWAP_PAGES	(128)
 #define SWAP_SIZE	(SWAP_PAGES * PAGESIZE)
 #undef DEBUG
 
@@ -27,14 +27,14 @@
 #define BF      (8)
 #define BA      (9)
 #define ST      (10)
-#define LD      (11)  
+#define LD      (11)
 #define CALL	(12)
 #define JMP	(13)
 #define MUL	(14)
 #define SEQI	(15)
 #define HALT    (16)
 
-char*	mnemonics[] = { 
+char*	mnemonics[] = {
 	[ADD] = "add",
 	[ADDI] = "addi",
 	[SUB] = "sub",
@@ -70,10 +70,12 @@ typedef struct {
 
 typedef struct {
 	page_table_entry_t*	owner;	/* Owner of this phys page. */
-	unsigned		page;	/* Swap page of page if assigned. */
+	unsigned		page;	/*
+	p page of page if assigned. */
 } coremap_entry_t;
 
 static unsigned long long	num_pagefault;		/* Statistics. */
+static unsigned long long	num_disk_writes;
 static page_table_entry_t	page_table[NPAGES];	/* OS data structure. */
 static coremap_entry_t		coremap[RAM_PAGES];	/* OS data structure. */
 static unsigned			memory[RAM_SIZE];	/* Hardware: RAM. */
@@ -120,15 +122,15 @@ void error(char* fmt, ...)
 
 static void read_page(unsigned phys_page, unsigned swap_page)
 {
-	memcpy(&memory[phys_page * PAGESIZE], 
-		&swap[swap_page * PAGESIZE], 
+	memcpy(&memory[phys_page * PAGESIZE],
+		&swap[swap_page * PAGESIZE],
 		PAGESIZE * sizeof(unsigned));
 }
 
 static void write_page(unsigned phys_page, unsigned swap_page)
 {
-	memcpy(&swap[swap_page * PAGESIZE], 
-		&memory[phys_page * PAGESIZE], 
+	memcpy(&swap[swap_page * PAGESIZE],
+		&memory[phys_page * PAGESIZE],
 		PAGESIZE * sizeof(unsigned));
 }
 
@@ -143,26 +145,25 @@ static unsigned new_swap_page()
 
 static unsigned fifo_page_replace()
 {
-	unsigned page; 
-	
-	unsigned curPos = num_pagefault % RAM_PAGES;
-
-	coremap[curPos].page = new_swap_page();
-
-	read_page(coremap[curPos].owner->page, coremap[curPos].page);
-
-	page = curPos;
+	unsigned page = num_pagefault % RAM_PAGES;
 
 	return page;
 }
 
 static unsigned second_chance_replace()
 {
-	int	page;
-	
-	page = INT_MAX; 
+	static unsigned ref_page_jumps;
 
-	assert(page < RAM_PAGES);
+	unsigned page = (num_pagefault +ref_page_jumps) % RAM_PAGES;
+
+	while (coremap[page].owner != NULL && coremap[page].owner->referenced) {
+		coremap[page].owner->referenced = false;
+		ref_page_jumps ++;
+		page = (num_pagefault +ref_page_jumps) % RAM_PAGES;
+	}
+
+
+	return page;
 }
 
 static unsigned take_phys_page()
@@ -171,11 +172,23 @@ static unsigned take_phys_page()
 
 	page = (*replace)();
 
+	if (coremap[page].owner!=NULL) {
+		if(coremap[page].owner->ondisk) {
+			coremap[page].owner->page = coremap[page].page;
+		}
+		else {
+			coremap[page].page = new_swap_page();
+			write_page(coremap[page].owner->page, coremap[page].page);
+			num_disk_writes++;
+			coremap[page].owner->ondisk = true;
+			coremap[page].owner->page = coremap[page].page;
+		}
+		coremap[page].owner->inmemory = false;
+	}
+
 	return page;
 }
 
-
-//Vad ska denna åstadkomma?
 static void pagefault(unsigned virt_page)
 {
 	unsigned		page;
@@ -184,6 +197,13 @@ static void pagefault(unsigned virt_page)
 
 	page = take_phys_page();
 
+	coremap[page].owner = &page_table[virt_page];
+	if (coremap[page].owner->ondisk) {
+		read_page(page,coremap[page].owner->page);
+		coremap[page].page = coremap[page].owner->page;
+	}
+	coremap[page].owner->page = page;
+	page_table[virt_page].inmemory = true;
 }
 
 static void translate(unsigned virt_addr, unsigned* phys_addr, bool write)
@@ -194,9 +214,8 @@ static void translate(unsigned virt_addr, unsigned* phys_addr, bool write)
 	virt_page = virt_addr / PAGESIZE;
 	offset = virt_addr & (PAGESIZE - 1);
 
-	if (!page_table[virt_page].inmemory){
+	if (!page_table[virt_page].inmemory)
 		pagefault(virt_page);
-	}
 
 	page_table[virt_page].referenced = 1;
 
@@ -267,7 +286,7 @@ void read_program(char* file, unsigned memory[], int* ninstr)
 		write_memory(memory, line, make_instr(opcode, a, b, c));
 
 		line += 1;
-	} 
+	}
 
 	*ninstr = line;
 }
@@ -293,7 +312,7 @@ int run(int argc, char** argv)
 	bool		writeback;
 
 	if (argc > 1)
-		file = argv[1];	
+		file = argv[1];
 	else
 		file = "a.s";
 
@@ -330,47 +349,47 @@ int run(int argc, char** argv)
 			puts("ADD");
 			dest = source1 + source2;
 			break;
-			
+
 		case ADDI:
 			puts("ADDI");
 			dest = source1 + constant;
 			break;
-			
+
 		case SUB:
 			puts("SUB");
 			dest = source1 - source2;
 			break;
-			
+
 		case SUBI:
 			puts("SUBI");
 			dest = source1 - constant;
 			break;
-			
+
 		case MUL:
 			puts("MUL");
 			dest = source1 * source2;
 			break;
-			
+
 		case SGE:
 			puts("SGE");
 			dest = source1 >= source2;
 			break;
-			
+
 		case SGT:
 			puts("SGT");
 			dest = source1 > source2;
 			break;
-			
+
 		case SEQ:
 			puts("SEQ");
 			dest = source1 == source2;
 			break;
-			
+
 		case SEQI:
 			puts("SEQI");
 			dest = source1 == constant;
 			break;
-			
+
 		case BT:
 			puts("BT");
 			writeback = false;
@@ -379,7 +398,7 @@ int run(int argc, char** argv)
 				increment_pc = false;
 			}
 			break;
-				
+
 		case BF:
 			puts("BF");
 			writeback = false;
@@ -388,7 +407,7 @@ int run(int argc, char** argv)
 				increment_pc = false;
 			}
 			break;
-				
+
 		case BA:
 			puts("BA");
 			writeback = false;
@@ -430,12 +449,12 @@ int run(int argc, char** argv)
 			writeback = false;
 			proceed = false;
 			break;
-		
+
 		default:
-			error("illegal instruction at pc = %d: opcode = %d\n", 
+			error("illegal instruction at pc = %d: opcode = %d\n",
 				cpu.pc, opcode);
 		}
-			
+
 		if (writeback && dest_reg != 0)
 			cpu.reg[dest_reg] = dest;
 
@@ -463,7 +482,7 @@ int run(int argc, char** argv)
 			printf("R%02d = %-12d", i, cpu.reg[i]);
 		}
 		printf("\n");
-	
+
 
 	}
 	return 0;
@@ -471,13 +490,14 @@ int run(int argc, char** argv)
 
 int main(int argc, char** argv)
 {
-#if 1
+#if 0
 	replace = fifo_page_replace;
 #else
 	replace = second_chance_replace;
 #endif
-	
+
 	run(argc, argv);
 
 	printf("%llu page faults\n", num_pagefault);
+	printf("%llu disk writes\n", num_disk_writes);
 }
