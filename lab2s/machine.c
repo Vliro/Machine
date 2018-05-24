@@ -174,15 +174,20 @@ static unsigned take_phys_page()
 
 	if (coremap[page].owner!=NULL) {
 		if(coremap[page].owner->ondisk) {
-			coremap[page].owner->page = coremap[page].page;
+			if (coremap[page].owner->modified) {
+				write_page(coremap[page].owner->page, coremap[page].page);
+				coremap[page].owner->modified = false;				
+				num_disk_writes++;
+			}
 		}
 		else {
 			coremap[page].page = new_swap_page();
 			write_page(coremap[page].owner->page, coremap[page].page);
 			num_disk_writes++;
 			coremap[page].owner->ondisk = true;
-			coremap[page].owner->page = coremap[page].page;
+
 		}
+		coremap[page].owner->page = coremap[page].page;
 		coremap[page].owner->inmemory = false;
 	}
 
